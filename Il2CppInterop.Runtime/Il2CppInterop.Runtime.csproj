@@ -33,7 +33,8 @@
 
   <ItemGroup>
     <PackageReference Include="Iced" Version="1.17.0" />
-    <PackageReference Include="TerraFX.Interop.Windows" Version="10.0.22621.2" />
+<!-- TerraFX.Interop.Windows is deliberately NOT referenced: MemoryUtils declares the two P/Invokes it needs.
+     A 17 MB metadata package would otherwise ship beside Il2CppInterop.Runtime.dll in every mod loader. -->
     <PackageReference Include="PolySharp" Version="1.14.1">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>

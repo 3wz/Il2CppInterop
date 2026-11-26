@@ -2,9 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using Il2CppInterop.Common.XrefScans;
-using TerraFX.Interop.Windows;
 
 namespace Il2CppInterop.Runtime;
 
@@ -21,13 +21,13 @@ internal class MemoryUtils
         nint ptr = 0;
         if (OperatingSystem.IsWindowsVersionAtLeast(6, 1))
         {
-            // Protections that permit reading; TerraFX defines no single composite of these.
-            const uint pageReadable = PAGE.PAGE_READONLY | PAGE.PAGE_READWRITE | PAGE.PAGE_WRITECOPY |
-                                      PAGE.PAGE_EXECUTE_READ | PAGE.PAGE_EXECUTE_READWRITE | PAGE.PAGE_EXECUTE_WRITECOPY;
+            // Protections that permit reading; there is no single composite constant for these.
+            const uint pageReadable = PageReadonly | PageReadwrite | PageWritecopy |
+                                      PageExecuteRead | PageExecuteReadwrite | PageExecuteWritecopy;
             var regions = GetModuleRegions(module);
             foreach (var region in regions)
             {
-                if (region.State != MEM.MEM_COMMIT || (region.Protect & PAGE.PAGE_GUARD) != 0 ||
+                if (region.State != MemCommit || (region.Protect & PageGuard) != 0 ||
                     (region.Protect & pageReadable) == 0)
                     continue;
                 ptr = FindSignatureInBlock((nint)region.BaseAddress, (long)region.RegionSize,
@@ -81,15 +81,15 @@ internal class MemoryUtils
     /// the readable committed ones. Stops at the first <c>VirtualQuery</c> failure or once the module end is reached.
     /// </summary>
     [SupportedOSPlatform("windows6.1")]
-    internal static unsafe List<MEMORY_BASIC_INFORMATION> GetModuleRegions(ProcessModule module)
+    internal static unsafe List<MemoryBasicInformation> GetModuleRegions(ProcessModule module)
     {
-        var regions = new List<MEMORY_BASIC_INFORMATION>();
+        var regions = new List<MemoryBasicInformation>();
         var moduleEndAddress = (long)module.BaseAddress + module.ModuleMemorySize;
         var currentAddress = (long)module.BaseAddress;
         while (currentAddress < moduleEndAddress)
         {
-            MEMORY_BASIC_INFORMATION memoryInfo = default;
-            var result = Windows.VirtualQuery((void*)currentAddress, &memoryInfo, (nuint)sizeof(MEMORY_BASIC_INFORMATION));
+            MemoryBasicInformation memoryInfo;
+            var result = VirtualQuery((void*)currentAddress, &memoryInfo, (nuint)sizeof(MemoryBasicInformation));
             if (result == 0)
                 break; // error, or reached the end of the module's mapped memory
 
@@ -99,6 +99,34 @@ internal class MemoryUtils
 
         return regions;
     }
+
+    // MEMORY_BASIC_INFORMATION and VirtualQuery are declared locally instead of pulling in TerraFX.Interop.Windows:
+    // this file only needs those two symbols, and TerraFX is a 17 MB dependency that has to be shipped next to the
+    // runtime otherwise. Layout matches the 64-bit Windows definition (sizeof == 48).
+    [StructLayout(LayoutKind.Sequential)]
+    internal unsafe struct MemoryBasicInformation
+    {
+        public void* BaseAddress;
+        public void* AllocationBase;
+        public uint AllocationProtect;
+        public ushort PartitionId;
+        public nuint RegionSize;
+        public uint State;
+        public uint Protect;
+        public uint Type;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern unsafe nuint VirtualQuery(void* lpAddress, MemoryBasicInformation* lpBuffer, nuint dwLength);
+
+    private const uint MemCommit = 0x1000;
+    private const uint PageReadonly = 0x02;
+    private const uint PageReadwrite = 0x04;
+    private const uint PageWritecopy = 0x08;
+    private const uint PageExecuteRead = 0x20;
+    private const uint PageExecuteReadwrite = 0x40;
+    private const uint PageExecuteWritecopy = 0x80;
+    private const uint PageGuard = 0x100;
 
     public struct SignatureDefinition
     {

@@ -114,9 +114,64 @@ namespace Il2CppInterop.Runtime.Injection.Hooks
             return getTypeInfoFromTypeDefinitionIndex;
         }
 
+        /// <summary>
+        /// On stock il2cpp the xref walk from Image::GetType lands on MetadataCache::GetTypeInfoFromTypeDefinitionIndex,
+        /// which takes a 32-bit type definition index. HybridCLR (and similar il2cpp restructurings) inserts a
+        /// MetadataCache::GetTypeInfoFromHandle hop in between; that function takes an Il2CppMetadataTypeHandle pointer,
+        /// so hooking it hands a small integer to code that dereferences its first argument and the process dies with an
+        /// access violation on the first call. Reject candidates that plainly dereference rcx instead of using it as an index.
+        /// </summary>
+        private static unsafe bool LooksLikeIndexSignature(IntPtr method)
+        {
+            var code = (byte*)method;
+
+            if (DereferencesFirstArgument(code)) return false;
+
+            // HybridCLR resolves Image::GetType through a tail-call wrapper instead of the metadata cache directly:
+            //   sub rsp, 0x28 ; call rel32 ; mov ecx, eax ; add rsp, 0x28 ; jmp rel32
+            // The wrapper forwards rcx unchanged, so the callee is the one that decides the argument type.
+            if (code[0] == 0x48 && code[1] == 0x83 && code[2] == 0xEC && code[3] == 0x28 && code[4] == 0xE8)
+            {
+                var callee = (byte*)((nint)method + 9 + *(int*)(code + 5));
+                if (DereferencesFirstArgument(callee)) return false;
+            }
+
+            return true;
+        }
+
+        private static unsafe bool DereferencesFirstArgument(byte* code)
+        {
+            // mov eax/ecx/edx, [rcx+disp8]  ->  8B 41/49/51 xx
+            if (code[0] == 0x8B && (code[1] == 0x41 || code[1] == 0x49 || code[1] == 0x51)) return true;
+            // mov eax/ecx/edx, [rcx]        ->  8B 01/09/11
+            if (code[0] == 0x8B && (code[1] == 0x01 || code[1] == 0x09 || code[1] == 0x11)) return true;
+            // mov rax, [rcx+disp8]          ->  48 8B 41/49/51 xx
+            if (code[0] == 0x48 && code[1] == 0x8B && (code[2] == 0x41 || code[2] == 0x49 || code[2] == 0x51)) return true;
+            // mov rax, [rcx]                ->  48 8B 01
+            if (code[0] == 0x48 && code[1] == 0x8B && code[2] == 0x01) return true;
+            return false;
+        }
+
         public override IntPtr FindTargetMethod()
         {
-            return FindGetTypeInfoFromTypeDefinitionIndex();
+            IntPtr target = FindGetTypeInfoFromTypeDefinitionIndex();
+            if (target != IntPtr.Zero && !LooksLikeIndexSignature(target))
+            {
+                Logger.Instance.LogWarning(
+                    "MetadataCache::GetTypeInfoFromTypeDefinitionIndex resolved to 0x{TargetAddress}, which does not take a type definition index; skipping hook. Injected types are still resolved via Class::FromIl2CppType and Class::FromName.",
+                    target.ToInt64().ToString("X2"));
+                return IntPtr.Zero;
+            }
+            return target;
+        }
+
+        /// <summary>
+        /// This hook is an optimisation for injected type lookups, not a requirement: Class::FromIl2CppType and
+        /// Class::FromName resolve the same injections. Keep the runtime alive when the target cannot be located.
+        /// </summary>
+        public override void TargetMethodNotFound()
+        {
+            Logger.Instance.LogTrace("MetadataCache::GetTypeInfoFromTypeDefinitionIndex hook skipped");
         }
     }
 }

@@ -166,7 +166,18 @@ namespace Il2CppInterop.Runtime.Injection
         {
             static nint GetClassInitSubstitute()
             {
-                if (TryGetIl2CppExport("mono_class_instance_size", out nint classInit))
+                // il2cpp_runtime_class_init is the public C entry point that wraps Class::Init and is exported by
+                // every il2cpp build, so it stays correct even when the byte signatures above fail to match.
+                // HybridCLR recompiles/restructures the metadata pipeline and reliably breaks those signatures.
+                // The legacy fallbacks below are NOT semantic equivalents: mono_class_instance_size only returns
+                // the instance size and never fills in the vtable, so injected types end up without Update/Start
+                // slots; mono_class_setup_vtable only covers vtable setup. Try the C API first.
+                if (TryGetIl2CppExport(nameof(IL2CPP.il2cpp_runtime_class_init), out nint classInit))
+                {
+                    Logger.Instance.LogTrace("Picked il2cpp_runtime_class_init as a Class::Init substitute");
+                    return classInit;
+                }
+                if (TryGetIl2CppExport("mono_class_instance_size", out classInit))
                 {
                     Logger.Instance.LogTrace("Picked mono_class_instance_size as a Class::Init substitute");
                     return classInit;

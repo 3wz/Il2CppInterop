@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Runtime.CompilerServices;
@@ -18,9 +20,19 @@ namespace Il2CppInterop.Runtime;
 
 public static unsafe class IL2CPP
 {
-    private static readonly Dictionary<string, IntPtr> ourImagesMap = new();
+    private static readonly ConcurrentDictionary<string, IntPtr> ourImagesMap = new();
+    private static long s_lastImageRefreshMs;
 
     static IL2CPP()
+    {
+        RefreshImages();
+    }
+
+    /// <summary>
+    /// Re-reads the il2cpp domain's assembly list into <see cref="ourImagesMap" />. The map is a snapshot, and
+    /// HybridCLR loads hot-update assemblies long after this class is first touched, so a miss has to re-scan.
+    /// </summary>
+    private static void RefreshImages()
     {
         var domain = il2cpp_domain_get();
         if (domain == IntPtr.Zero)
@@ -36,23 +48,42 @@ public static unsafe class IL2CPP
             var image = il2cpp_assembly_get_image(assemblies[i]);
             var name = il2cpp_image_get_name_(image)!;
             ourImagesMap[name] = image;
+
+            // HybridCLR registers hot-update images under names that keep the ".dll" suffix, while callers (and
+            // Il2CppClassPointerStore) look assemblies up by the bare name. Index both spellings so either style
+            // resolves; TryAdd keeps a real image that legitimately owns the bare name.
+            if (name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+                ourImagesMap.TryAdd(name[..^4], image);
         }
+    }
+
+    private static void RefreshImagesIfStale()
+    {
+        // Throttle: an unresolved name would otherwise re-enumerate the whole domain on every lookup. One caller
+        // per 500 ms performs the scan; the others simply miss again and are corrected on the next lookup.
+        var now = Environment.TickCount64;
+        if (now - Interlocked.Exchange(ref s_lastImageRefreshMs, now) < 500) return;
+        RefreshImages();
     }
 
     internal static IntPtr GetIl2CppImage(string name)
     {
-        if (ourImagesMap.ContainsKey(name)) return ourImagesMap[name];
-        return IntPtr.Zero;
+        if (ourImagesMap.TryGetValue(name, out var image)) return image;
+        RefreshImagesIfStale();
+        return ourImagesMap.TryGetValue(name, out image) ? image : IntPtr.Zero;
     }
 
     internal static IntPtr[] GetIl2CppImages()
     {
-        return ourImagesMap.Values.ToArray();
+        // Distinct: the map can hold several spellings that alias one image (see the .dll alias in the ctor), and
+        // callers such as InjectorHelpers.AddTypeToLookup add one lookup row per returned pointer.
+        return ourImagesMap.Values.Distinct().ToArray();
     }
 
     public static IntPtr GetIl2CppClass(string assemblyName, string namespaze, string className)
     {
-        if (!ourImagesMap.TryGetValue(assemblyName, out var image))
+        var image = GetIl2CppImage(assemblyName);
+        if (image == IntPtr.Zero)
         {
             Logger.Instance.LogError("Assembly {AssemblyName} is not registered in il2cpp", assemblyName);
             return IntPtr.Zero;
